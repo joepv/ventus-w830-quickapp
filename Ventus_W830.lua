@@ -1,13 +1,15 @@
 ----------------------------------------------------------------------------------
 -- Ventus W830 Weather Station
+-- Version 1.1 (May 2024) - Added WindGust childdevice, rounded numbers
+--   and fixed nil bug when value was not send by weatherstation.
 -- Version 1.0 (April 2022)
--- Copyright (c)2022 Joep Verhaeg <info@joepverhaeg.nl>
+-- Copyright (c)2022-2024 Joep Verhaeg <info@joepverhaeg.nl>
 
 -- Full documentation you can find at:
 -- https://docs.joepverhaeg.nl/ventus-w830/
 ----------------------------------------------------------------------------------
 -- DESCRIPTION:
--- This Quick App integrates with the Ventus W830 local API. It shows the 
+-- This Quick App integrates with the Ventus W830 local API. It shows the
 -- weather station readings and uses the correct FIBARO device types.
 
 -- QUICK SETUP:
@@ -16,14 +18,21 @@
 -- 3. Configure the Node-RED or PHP server to forward the payload to this
 --    Ventus W830 Quick App (an example is included in the documentation).
 ----------------------------------------------------------------------------------
+__TAG = "QAVENTUS" .. plugin.mainDeviceId
+_VERSION = "1.1"
 
 local function getChildVariable(child, varName)
     for _,v in ipairs(child.properties.quickAppVariables or {}) do
-        if (v.name == varName) then 
+        if (v.name == varName) then
             return v.value
         end
     end
     return ""
+end
+
+local function round(num, numDecimalPlaces)
+    local mult = 10^(numDecimalPlaces or 0)
+    return math.floor(num * mult + 0.5) / mult
 end
 
 class 'Sensor'(QuickAppChild)
@@ -33,46 +42,47 @@ function Sensor:__init(device)
 end
 
 function Sensor:updateValue(propertyName, weatherdata)
-    -- local weatherdata = json.decode(payload,{others = {null=false}})
-    -- {"PASSKEY":"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX","stationtype":"EasyWeatherV1.6.1","dateutc":"2022-03-21 18:43:31","tempinf":"72.9","humidityin":"40","baromrelin":"29.938","baromabsin":"30.337","tempf":"55.9","humidity":"66","winddir":"24","windspeedmph":"0.0","windgustmph":"0.0","maxdailygust":"8.1","rainratein":"0.000","eventrainin":"0.000","hourlyrainin":"0.000","dailyrainin":"0.000","weeklyrainin":"0.000","monthlyrainin":"0.020","totalrainin":"25.780","solarradiation":"0.00","uv":"0","wh65batt":"0","freq":"868M","model":"WS2900_V2.01.14"}
     if propertyName == "tempinf" then
         -- Convert temperature from Fahrenheit to Celcius
         local tempinc = (tonumber(weatherdata['tempinf']) - 32) * 5 / 9
-        self:updateProperty("value", tempinc)
+        self:updateProperty("value", round(tempinc, 2))
     elseif propertyName == "tempf" then
         local tempc = (tonumber(weatherdata['tempf']) - 32) * 5 / 9
-        self:updateProperty("value", tempc)
+        self:updateProperty("value", round(tempc, 2))
     elseif propertyName == "uv" then
         local uvi = tonumber(weatherdata['uv'])
-        if uvi == 0 then 
-            uvalert = "Geen"
+        if uvi == 0 then
+            uvalert = "None"
         elseif uvi <= 2 then
-            uvalert = "Vrijwel geen"
+            uvalert = "Very Low"
         elseif uvi <= 4 then
-            uvalert = "Zwak"
+            uvalert = "Low"
         elseif uvi <= 6 then
-            uvalert = "Matig"
+            uvalert = "Moderate"
         elseif uvi <= 8 then
-            uvalert = "Sterk"
+            uvalert = "High"
         elseif uvi >= 9 then
-            uvalert = "Zeer sterk"
+            uvalert = "Very High"
         end
         self:updateProperty("value", uvi)
         self:updateProperty("log", uvalert)
     elseif propertyName == "baromabsin" then
         -- Convert barometric pressure from inHg to hPa
         local baromabsin = math.floor((tonumber(weatherdata['baromabsin'])/0.029529983071445)*100)/100
-        self:updateProperty("value", baromabsin)
+        self:updateProperty("value", round(baromabsin, 2))
     elseif propertyName == "windspeedmph" then
-        local windspeedkmh = tonumber(weatherdata['windspeedmph'])*1,60934
-        local maxdailygust  = tonumber(weatherdata['maxdailygust'])*1,60934
-        self:updateProperty("value", windspeedkmh)
-        self:updateProperty("log", "Windvlaag: " .. maxdailygust .. " km/u")
+        local windspeedkmh = tonumber(weatherdata['windspeedmph'])*1.609344
+        self:updateProperty("value", round(windspeedkmh, 2))
+    elseif propertyName == "windgustmph" then
+        local windgustmph = tonumber(weatherdata['windgustmph'])*1.609344
+        self:updateProperty("value", round(windgustmph, 2))
+        local maxdailygust  = tonumber(weatherdata['maxdailygust'])*1.609344
+        self:updateProperty("log", "Max: " .. round(maxdailygust, 2) .. " km/u")
     elseif propertyName == "dailyrainin" then
         local dailyrainin = tonumber(weatherdata['dailyrainin'])*25.4
         local monthlyrainin  = math.floor((tonumber(weatherdata['monthlyrainin'])*25.4)*10)/10
         self:updateProperty("value", dailyrainin)
-        self:updateProperty("log", "Maand: " .. monthlyrainin .. " mm")
+        self:updateProperty("log", "Month: " .. monthlyrainin .. " mm")
     else
         -- Parse the other properties
         self:updateProperty("value", tonumber(weatherdata[propertyName]))
@@ -86,12 +96,14 @@ function QuickApp:data(weatherdata)
     self:updateProperty("log", os.date('%d-%m %H:%M:%S'))
     for id, child in pairs(self.childDevices) do
         local propertyName = child:getVariable("propertyName")
-        child:updateValue(propertyName, weatherdata)
+        if weatherdata[propertyName] then
+            child:updateValue(propertyName, weatherdata)
+        end
     end
 end
 
 function QuickApp:onInit()
-    self:debug("QuickApp: Ventus W830 initialisation")
+    self:debug("Initialising Ventus W830 integration v" .. _VERSION)
 
     self.childsInitialized = true
     if not api.get("/devices/" .. self.id).enabled then
@@ -109,6 +121,7 @@ function QuickApp:onInit()
             {name="Outdoor Temperature", className="Sensor", propertyName="tempf", type="com.fibaro.temperatureSensor"},
             {name="Outdoor Humidity", className="Sensor", propertyName="humidity", type="com.fibaro.humiditySensor"},
             {name="Wind Speed", className="Sensor", propertyName="windspeedmph", type="com.fibaro.windSensor", unit="km/h"},
+            {name="Wind Gust", className="Sensor", propertyName="windgustmph", type="com.fibaro.windSensor", unit="km/h"},
             {name="Rain Fall", className="Sensor", propertyName="dailyrainin", type="com.fibaro.rainSensor", unit="mm"},
             {name="Light", className="Sensor", propertyName="solarradiation", type="com.fibaro.multilevelSensor", unit="w/m2"},
             {name="UV index", className="Sensor", propertyName="uv", type="com.fibaro.multilevelSensor", unit="UVI"}
@@ -133,7 +146,7 @@ function QuickApp:onInit()
         end
     else
         -- Ok, we already have children, instantiate them with the correct class
-        -- This is more or less what self:initChildDevices does but this can handle 
+        -- This is more or less what self:initChildDevices does but this can handle
         -- mapping different classes to the same type...
         for _,child in ipairs(cdevs) do
             local className = getChildVariable(child,"className") -- Fetch child class name
